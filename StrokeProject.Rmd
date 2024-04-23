@@ -1,0 +1,388 @@
+---
+title: "Stroke_STAT488"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# Stroke and Survival Analysis
+STAT488 Project- 2024 Spring
+Avery Shoemaker
+
+
+
+
+## Packages
+```{r}
+library(survival)
+library(tidyverse)
+library(dplyr)
+library(lubridate)
+library(ggsurvfit)
+library(gtsummary)
+library(tidycmprsk)
+library(rpart)
+library(ranger)
+library(ggplot2)
+library(ggfortify)
+```
+
+
+## Stroke Dataset
+
+This data set has been cleaned so private information is hidden from my use.
+The variables are as follows:
+group: 
+time: date and time of the beginning of data point collection
+at_home: TRUE/ FALSE if the subject is walking at home
+dis_max: related to max distance from home?
+home_endpoint: TRUE/ FALSE
+dur_U: duration upright
+dur_s: duration stepping
+end_time: when the activity is completed
+events: n/a
+trial:data collected from 60 days or 90 days
+subj: the subject
+
+```{r}
+stroke_data <- readRDS("C:/Users/avery/Downloads/STAT384/stroke_data.rds")
+```
+
+
+
+
+## Filtering and Mutating and Other Fun Stuff
+
+I am first going to filter the data for the trial to be 60 days (or 90 days).
+  sd60: stroke data at 60 days
+  sd90: stroke data at 90 days
+From there I am making a new variable 'status' where the status 0=alive, 1=dead
+
+Because every instance of walking has a ending, all of the data has a status of 1.
+
+
+'Figure 1'
+```{r}
+sd60 <- stroke_data %>% filter(trial == 60) 
+  sd_60 <- sd60 %>% mutate( status = 1)  %>% filter(dur_s < 1000)
+  
+sd90 <- stroke_data %>% filter(trial == 90) 
+  sd_90 <- sd90 %>% mutate( status = 1)   %>% filter(dur_s < 1000)
+                                                        
+```
+
+We are going to build the standard survival object. Time records survival time and status indicates whether death was observed or censored.
+
+
+
+
+## Kaplan-Meier Probability and Survival Function
+
+I made a KM survival function where dur_s (duration stepping) is used as the time variable and status is used as status. 
+   "basically a compiled version of the serial time and status". The numbers with a '+' means that the data was censored. 
+   
+Surv Function: takes time and status as its parameters and makes a survival object from it. This is then used to be fit into different plots.
+
+'Figure 2'
+```{r}
+km90 <- with(sd_90, Surv(dur_s, status))
+head(km90,100)
+km60 <- with(sd_60, Surv(dur_s, status))
+head(km60,100)
+```
+The fit functions show the survival percentage as well as Confidence intervals for times 1, 25, and every 25 seconds after. Confidence intervals: upper and lower for each time t
+
+1 is the constant term.
+
+'Figure 3'
+```{r}
+km90_fit <- survfit(Surv(dur_s,status) ~ 1, data = sd_90)
+summary(km90_fit, times = c(1,25*(1:10)))
+km60_fit <- survfit(Surv(dur_s,status) ~ 1, data = sd_60)
+summary(km60_fit, times = c(1,25*(1:10)))
+```
+
+
+
+
+### Plotting the Survival Functions
+
+
+'Figure 4'
+```{r}
+autoplot(km90_fit)
+```
+The issue I come across is that there are a few times that are very large (for example 12845.1 seconds). This is equivalent to 3.56 hours. 
+For that I used the filter function (Filtering and Mutating section) to make the cut off 1000 seconds, which is approximately 16.6 minutes. 
+
+We can see in these 2 graphs that both graphs have a similar shape, though 60 days may appear to have a higher survival rate than 90 days.
+
+
+'Figure 5'
+```{r}
+autoplot(km60_fit)
+```
+
+
+
+'Figure 6'
+```{r}
+alld <- stroke_data %>% mutate(status = 1) 
+
+all_fit <- survfit(Surv(dur_s,status) ~ subj + trial , data = alld)
+summary(all_fit, times = c(1,25*(1:10)))
+
+autoplot(all_fit)
+```
+
+
+
+
+## Does Day Have an Effect?
+
+I will use the Lubridate package here to determine the days that each of the subjects were observed for.
+
+
+'Figure 7'
+```{r}
+# Load the lubridate package
+library(lubridate)
+```
+
+
+I want to see if there is any effect that day of week has on how the survival curve.
+
+We create variable `dayofweek` which will be Sun-Sat from the `time` variable.
+
+
+'Figure 8'
+```{r}
+# Sample POSIXct datetime
+SDdate <- stroke_data %>% 
+  mutate(dayofweek = wday(alld$time, label = TRUE)) %>% 
+  mutate( status = 1) 
+
+```
+
+From there I am able to draw a survival curve that shows the effect of day of week. This is the only co-variate I am using in this graph, but participant could also be added.
+
+Based on the graph, most of the days appear to have a similar shape, but Friday is has a larger survival percentage, which leads us to our next question...
+
+NOTE:
+  xlim creates a limit to the graph without actually removing data (in the instance of Friday, there was a case where time went way beyond the others, so I decided to truncate the data to be more visibly understandable)
+  facet_wrap separates the graphs into each of variable objects (dayofweek would create 7 different graphs based on the day of the week)
+  scale_y_log10 transforms the y axis to represent powers of 10 rather than a linear system
+
+
+'Figure 9'
+```{r}
+
+date_fit <- survfit(Surv(dur_s,status) ~ dayofweek , data = SDdate)
+summary(date_fit, times = c(1,25*(1:10)))
+
+autoplot(date_fit) + 
+  xlim(c(0,1000)) +
+  # facet_wrap(~strata) +
+  scale_y_log10()
+```
+
+
+
+## Is the pattern for Friday consistent for everybody?
+
+  I am first going to break apart the data for each subject as each subject may have been given a tracking device on different days. 
+  Then I can break that apart by day to see if there appears to be any differences in days. 
+  I am doing this because Friday appears to have a higher survival percentage than the other days, but I want to find out if this is just because one or a few people are causing this effect or if can be generalized.
+
+
+'Figure 10'
+```{r}
+date_fit2 <- survfit(Surv(dur_s,status) ~ dayofweek , data = SDdate)
+summary(date_fit, times = c(1,25*(1:10)))
+
+autoplot(date_fit2) + 
+  xlim(c(0,1000)) +
+  facet_wrap(~strata) +
+  scale_y_log10()
+```
+
+We can see that there does appear to be a slight difference based on day of week, but I am going to dig further to see if there is any difference based on subjects. 
+It is known that the subjects received the tracking device on different days, so I want to explore if that makes a difference.
+
+
+'Figure 11'
+```{r}
+dayfit <- survfit(Surv(dur_s,status) ~ subj + dayofweek , data = SDdate)
+summary(dayfit, times = c(1,25*(1:10)))
+
+autoplot(dayfit) + 
+  xlim(c(0,1000)) +
+  facet_wrap(~strata) +
+  scale_y_log10()
+```
+
+This shows the survival curves for each of the subjects and days of the week. 
+It is obvious that subject 027 has a significantly different survival curve from the other subjects.
+Additionally, we can see that Friday does seem to have a higher survival percentage when compared to the other days. The only subject where this does not apply is 019 and 027, where Friday seems to be similar to the rest of the week.
+
+
+
+
+## Is the way this tracks up related to the day of week people get the device?
+
+I am filtering the data down to only see entries for Friday.
+
+
+'Figure 12'
+```{r}
+subjwk <- SDdate %>% 
+  filter(dayofweek == "Fri") 
+  
+```
+
+Then I am plotting it to see if there are any subjects that appear to be significantly different than the other.
+
+
+'Figure 13'
+```{r}
+subj_fit <- survfit(Surv(dur_s,status) ~ subj , data = subjwk)
+summary(date_fit, times = c(1,25*(1:10)))
+
+autoplot(subj_fit) + 
+  xlim(c(0,1000)) +
+  facet_wrap(~strata) +
+  scale_y_log10()
+```
+
+When looking that the plot, 019 and 031 have curves that look different than the other subjects. So now I want to see what days each of the subjects got the device, then make a plot based off that information. I plan to compare the day '0' of each subject to see if walking time is any different when the subjects first get the device vs later in the study.
+
+First I need to make a new variable that tells what day the subject received the tracking device.This new variable is called 'firsttime' for when the first steps of each subject were taken.
+
+For each subj and trial, I want to find the earliest time. This is how I can determine when the subject received the tracking device. 
+
+
+'Figure 14'
+```{r}
+SDdate %>% 
+  summarise(.by=c(subj,trial),firsttime=min(time))
+```
+
+From this 'firsttime' variable I need to calculate how far from each subject's 'firsttime' each time was collected. I am doing this by taking the time of recorded activity and subtracting it from the 'firsttime' the subject got the device. Then dividing this number by 86,400 (number of seconds in a day). From here, I am able to round this number to find what day after receiving the device each recorded walking session was.
+
+'result' dataframe shows the 'dayofwear' as how many days after receiving the device each duration was observed.
+
+
+'Figure 15'
+```{r}
+ result <- SDdate %>%
+  mutate(.by=c(subj,trial), firsttime = min(time)) %>%
+  mutate( dayofwear = (round((time-firsttime)/86400)))
+``` 
+
+
+'wearfit' is a survival fit of the survival function. It takes the survival function and 'subj' and 'dayofwear' to regress against. The day of wear is filerted to be less than 7 because some subjects had the device for longer than 7 days. I want to see how the time looks for just a week so that each of the subjects have the device for the same amount of time.
+
+
+'Figure 16'
+```{r}
+wearfit <- survfit(Surv(dur_s,status) ~ subj + dayofwear , 
+                   data = result %>% 
+                     filter( dayofwear < 7))
+summary(wearfit, times = c(1,25*(1:10)))
+
+autoplot(wearfit)  +
+  xlim(c(0,1000)) +
+  facet_wrap(~strata) +
+  scale_y_log10()
+```
+
+The graph for each of the subjects for each of the days of wear are displayed above. Previously, it was determined that Friday might have some significant impact on the duration of walking, but with this new display, it is hard to determine what day Friday was.
+
+From looking at the graphs, there doesn't appear to be any significant difference on the first day of wearing when compared to the rest of the week. 
+
+
+
+
+## Comparing Day of Wear for each Trial
+
+
+I am using the same function as above, but filtering it down to trial as 60 days. I am then going to compare the trials (60 vs 90).
+
+'Figure 17'
+```{r}
+wearfit <- survfit(Surv(dur_s,status) ~ subj + dayofwear  , 
+                   data = result %>% 
+                     filter( dayofwear < 7) %>%
+                    filter (trial == 60))
+
+summary(wearfit, times = c(1,25*(1:10)))
+
+autoplot(wearfit)  +
+  xlim(c(0,1000)) +
+  facet_wrap(~strata) +
+  scale_y_log10()
+```
+
+We can see the plots for each of the subjects at the 60 day mark. Subject 007 only had the device for 6 days which makes reading this chart a little more difficult, but we can still see that day 0 may have an impact on time for subjects 007, 027, and 031.  
+
+
+I am going to now look at 90 days to see if there is much difference between the two.
+
+
+'Figure 18'
+```{r}
+wearfit <- survfit(Surv(dur_s,status) ~ subj + dayofwear  , 
+                   data = result %>% 
+                     filter( dayofwear < 7) %>%
+                    filter (trial == 90))
+
+summary(wearfit, times = c(1,25*(1:10)))
+
+autoplot(wearfit)  +
+  xlim(c(0,1000)) +
+  facet_wrap(~strata) +
+  scale_y_log10()
+```
+
+
+
+
+## Results and Findings
+
+### Abstract
+
+It is well known that strokes impact the ability of patients to walk as well as the duration. In this data set, 6 subjects listed as 007, 010, 016, 019, 027, and 031, were tracked at to time points (60 and 90 days after stroke). The day and time of each walk was collected resulting in 3382 unique entries. Each of these entries track the location of each walk (at home: True/False) as well as if their walk ended at home. This means that the subject could have started their walk at their home but walked to their car, convince store, neighbors house, etc. and vice versa. The distance of each walk was also recorded along with the duration of the subject being upright (dur_u) and duration actually stepping (dur_s). The end time of each walk was also recorded allowing for the calculation of finding time upright. To insure anonymity, the majority of the information about the patients were excluded. However, the data set had enough information for analysis on the walking patterns of these subjects.
+
+### Process
+When looking at the stroke data-set, I wanted to look for the duration of walking based on different variables. Throughout the study, I used various packages but mostly tidyverse, ggplot2, survival, and lubridate. 
+Initially, I found the survival curves for each of trials (60 and 90), then I broke that down even more to subject and trial. 
+The task after looking at that was to then find when each subject received the tracking device to then compare and determine if the number of days after receiving the device made an impact on how long the subjects were walking. Each of the plots in the analysis above can be altered to include more of the co-variates or less depending on what information is requested. I go into further detail in the 'Analysis' portion.
+
+### Analysis
+
+When looking at Figure 1, I am filtering the initial stroke data into trial. From there I am making a new variable called ‘status’ to make a survival function. In this case I am declaring that status = 1 because all of the times have an end point. Because every walk will have a start and an end, there is no need to censor and thus every data point is 1. I did the same for 90 days. This data frame gave me two outputs ‘sd60’ and ‘sd90’ which essentially is the same as the original except broken into trial and included the variable status. These data frames became useful when making the survival function in upcoming code chunks.
+
+Figure 2 used the data frames found in Figure 1. Each of the data frames were fit into a Survival Function within the survival package. These Kaplan-Meier survival functions basically compile and combine the parameters of time and status. The main purpose of this code chunk is to be used for plotting a survival plot. The first plot I chose to create with this is the fit function. A fit function shows the survival percentage as well as confidence intervals for times 1, 25, and then every 25 seconds afterwards. In the code chunk Figure 3, I am using the survfit function that takes the Surv function and regresses it against the constant 1. Summary just shows the result of this function before I decide to visualize it. Figure 4 and 5 show these survfit functions for each of the trials. These curves show the generalization for all 6 subjects, which does not account for each of the individual’s variability. However, we can see that in general, trial 60 had a higher survival curve than 90 days. I found this to be interesting and wondered if the variability within the subjects caused this. 
+
+To break this information down based on subject and trial, I had to begin by creating a new data frame which I called ‘alld’. This frame contained everything as the original data frame, but with the addition of status=1. Similar to the process above, I created a survival function that took duration of stepping and status as its parameters and regressed it against subject and trial. This function was then plotted to display the curves of each of the subjects and their trial. From looking at the graph, it is obvious that there were a few subjects who walked significantly more than others, most notable is subject 016. So I know that each of the subjects are different, but another question that was brought up was if day has an effect on the duration of walking.
+
+In figure 7, I am loading the ‘lubridate’ package to analyze the time variable and manipulate day and time. Figure 8 shows the creation of the data frame ‘SDdate’ that takes the original data and mutates it so that we can see what day of the week each event was taken. Label= TRUE lists the days as ‘Fri’, ‘Sat’, etc. I can then use this data frame to make another survival curve based on day of week in Figure 9. When initially looking at the graph, I noticed that there were a few cases where the time of stepping was significantly larger than the majority. This was making the model harder to read, and thus I excluded any times that were larger than 1000 seconds (which is approximately 16.7 minutes). In addition to this, I used a log scale because I wanted to respond to the skewness and for legibility as the log scale provides percentages of survival. Overall, the log scale made the models more easier to understand especially when comparing multiple plots. The model shows these estimates well, but it is still hard to  decipher differences between each of the days. 
+
+To answer the question if there is a pattern for Friday, I use a similar process as the code chunk in Figure 9, but I include a facet_wrap function which allows me to break the plots into subplots based on a variable, in this case ‘strata’. When breaking the data into just the days (Figure 10), there does seem to be a difference based on the day of week, but I cannot determine if this is the only reason for this shape. There could be other reasons such as what day each subject got the tracking device. Some subjects could possibly walk more when they first get their tracking device, and eventually lose interest in the study and walk less by the end of the trial. I wanted to look further into this and eventually compare the days each of the subjects received their device with each other to control for differences in day of week. 
+
+Figure 11 is essentially the same as Figure 10, except the I included the subject into the survfit function and broke the model based on strata. This eventually made a model of 42 graphs, one for each day of week for each of the subjects. When looking at these models, I can make observations for each of the subjects as well as the general group. To begin, subject 007 appeared to be decently consistent with their walking throughout the week, but had a higher survival rate on Friday and Saturday. Subject 010 was also consistent with their walking until Friday when they similarly had a higher survival rate on Friday. Subject 016 looks different on Friday, but this is where I cut off the data because it exceeded 1000 seconds. This further pushes the idea that subjects walk more on Friday. Interestingly, subject 019 had a higher survival rate on Thursday instead of Friday. No observations seemed to be out of the ordinary for subjects 027 and 031. Because of the weird pattern that showed up in the majority of these subjects, I decided to dig into when each of the subjects received the tracking device. 
+
+From here onward, I am looking into if the duration of walking tracks up with what day of the week people get the device. In figure 12, I am filtering down the entire original data set to see the duration of Friday only. Then in figure 13, I am making a new survival function using this filtered data. When looking at the plot created by these figures, it appears that 019 and 031 have curves that look different than the other subjects. The next task is then find day ‘0’ for all the subjects. I use lubridate here to find the first time each subject and trial tracked any walking. This is noted in Figure 14 and the new variable is called ‘firsttime’. This variable is useful because I need to compare each of the events with their ‘firsttime’ to get the day of wear. In figure 15, I am making a new data frame called ‘result’ where I am taking the mutated data with the new ‘firsttime’ variable and creating another new variable called ‘dayofwear’.. Result data frame shows the ‘dayofwear’ as how many days after receiving the device each duration of stepping was observed. Because the result was produced in seconds after the initial wear, I had to divide by 86,400 which is the number of seconds in a day. This means that each day number is represented in 24 hours after the ‘firsttime’ rather than calendar day. 
+
+When looking at the model outputted  by this code chunk, it is difficult to determine what day of the week is what. There appears to be no correlation between how many days the subject was wearing the device and the duration of their walks. For subjects 007, 016, 027, and 031 the plots may suggest that the patient walked less and less as the study went on. However, the plots are not strong enough to make this determination. Overall, there does not appear to be any significant difference on the first day of wear when compared to the rest of the week. 
+
+I am breaking this model down further to compare the day of wear for each of the trials. I use the same function from 16 as figure 17 but am adding the filter for 60 days. Figure 18 is the same as 17, but filtered for trial=90. Just from looking at the plots it appears that the subjects may have been walking less at the 90 day mark. However, subjects 027 and 031 also appear to have increased their walking times. This was interesting and although I did not have much time left to explore this, I created enough models to draw some kinds of conclusions.
+
+
+
+### Conclusion
+
+When looking at the questions aroused throughout the study, each answer to each possible scenario brought up another question. Each of the code chunks in this study can be manipulated to answer additional questions brought up throughout the process. Overall, the patterns found in the study should not be generalized because the size of the data was not very large. Because keeping anonymity was so significant in the data, without knowing more about these stroke patients, not many conclusions could be drawn. Nevertheless, these models and their code are suitable for use for other imaging.
+
+
+
